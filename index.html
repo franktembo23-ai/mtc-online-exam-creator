@@ -4053,6 +4053,22 @@ function teSaveRecord(rec) {
   var records = teGetRecords();
   records.push(rec);
   try { localStorage.setItem(PERF_KEY, JSON.stringify(records)); } catch(e) { showToast('Storage full — cannot save record'); }
+  
+  // Push to cloud for cross-device sync
+  try {
+    if (typeof cloudDB !== 'undefined' && cloudDB) {
+      var recId = 'perf_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+      rec.cloudId = recId;
+      rec.syncedAt = new Date().toISOString();
+      cloudDB.ref('mtc_performance_records/' + recId).set(rec)
+        .then(function() {
+          addSyncLog('success', 'Performance record synced: ' + (rec.studentName || 'Student'));
+        })
+        .catch(function(e) {
+          addSyncLog('warn', 'Performance sync failed, saved locally');
+        });
+    }
+  } catch(e) {}
 }
 
 function renderPerfRecords() {
@@ -6149,6 +6165,38 @@ function syncPullAll() {
         addSyncLog('info', 'No new exams to pull. All are already in bank.');
         showToast('No new exams to pull.');
       }
+
+      // Also pull performance records
+      cloudDB.ref('mtc_performance_records').once('value')
+        .then(function(perfSnap) {
+          if (perfSnap.val()) {
+            var perfData = perfSnap.val();
+            var perfKeys = Object.keys(perfData);
+            var records = teGetRecords();
+            var perfLoaded = 0;
+            for (var pi = 0; pi < perfKeys.length; pi++) {
+              var rec = perfData[perfKeys[pi]];
+              if (!rec || !rec.studentName) continue;
+              var exists = false;
+              for (var ri = 0; ri < records.length; ri++) {
+                if ((records[ri].cloudId && records[ri].cloudId === rec.cloudId) ||
+                    (records[ri].timestamp === rec.timestamp && records[ri].studentName === rec.studentName)) {
+                  exists = true;
+                  break;
+                }
+              }
+              if (!exists) {
+                records.push(rec);
+                perfLoaded++;
+              }
+            }
+            if (perfLoaded > 0) {
+              try { localStorage.setItem(PERF_KEY, JSON.stringify(records)); } catch(e) {}
+              renderPerfRecords();
+              addSyncLog('success', 'Pulled ' + perfLoaded + ' performance record(s) from cloud!');
+            }
+          }
+        });
     })
     .catch(function(e) {
       addSyncLog('error', 'Pull failed: ' + e.message);
@@ -6250,6 +6298,33 @@ function syncStartAutoSync() {
           break;
         }
       }
+    }
+  });
+
+  // --- Performance Records Cloud Sync ---
+  try { cloudDB.ref('mtc_performance_records').off(); } catch(e) {}
+
+  cloudDB.ref('mtc_performance_records').on('child_added', function(snapshot) {
+    var rec = snapshot.val();
+    if (!rec || !rec.studentName) return;
+    var records = teGetRecords();
+    var exists = false;
+    for (var i = 0; i < records.length; i++) {
+      if (records[i].cloudId && records[i].cloudId === rec.cloudId) {
+        exists = true;
+        break;
+      }
+      // fallback match by timestamp and name
+      if (records[i].timestamp === rec.timestamp && records[i].studentName === rec.studentName && records[i].examTitle === rec.examTitle) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists) {
+      records.push(rec);
+      try { localStorage.setItem(PERF_KEY, JSON.stringify(records)); } catch(e) {}
+      renderPerfRecords();
+      addSyncLog('success', 'Performance synced: ' + rec.studentName + ' - ' + rec.examTitle);
     }
   });
 
